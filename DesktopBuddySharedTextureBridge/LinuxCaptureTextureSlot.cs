@@ -74,17 +74,28 @@ namespace DesktopBuddySharedTextureBridge
                 return;
             }
 
-            SharedTextureBridgePlugin.LogInfo($"[LinuxCapture] SHM capture start calling native bridge node={_pipeWireNodeId}");
+            // Both stages run unmanaged code that can take the renderer down, so both stay inside
+            // the guard. They are issued separately only so the marker can name which one lost.
             int status;
             try
             {
-                status = _bridge.StartCapture(_pipeWireNodeId);
+                SharedTextureBridgePlugin.LogInfo($"[LinuxCapture] Loading native capture library node={_pipeWireNodeId}");
+                status = _bridge.LoadNative();
+                SharedTextureBridgePlugin.LogInfo($"[LinuxCapture] Native capture library load returned {status}");
+
+                if (status == 0)
+                {
+                    LinuxCaptureGuard.MarkStage(LinuxCaptureGuard.StageConnect);
+                    SharedTextureBridgePlugin.LogInfo($"[LinuxCapture] SHM capture start calling native bridge node={_pipeWireNodeId}");
+                    status = _bridge.StartCapture(_pipeWireNodeId);
+                    SharedTextureBridgePlugin.LogInfo($"[LinuxCapture] SHM capture start returned {status} node={_pipeWireNodeId}");
+                }
             }
             finally
             {
                 LinuxCaptureGuard.EndNativeStart();
             }
-            SharedTextureBridgePlugin.LogInfo($"[LinuxCapture] SHM capture start returned {status} node={_pipeWireNodeId}");
+
             if (status != 0)
                 SharedTextureBridgePlugin.LogWarning($"[LinuxCapture] SHM capture did not start cleanly: {status}");
 

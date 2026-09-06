@@ -156,6 +156,15 @@ deploy_profile() {
   copy_file "$linux_bridge_dir/libdesktopbuddy_linux_native.so" "$bridge_target/libdesktopbuddy_linux_native.so"
   copy_file "$linux_bridge_dir/libdesktopbuddy_linux_stream.so" "$bridge_target/libdesktopbuddy_linux_stream.so"
 
+  # The guard's strike count describes the binaries that crashed, and the copies above just
+  # replaced them. Keeping it would have a fresh build — quite possibly the fix — refuse to
+  # attempt native capture at all, with only a startup log line to say why.
+  local capture_guard="$bridge_target/linux-capture.guard"
+  if [[ -f "$capture_guard" ]]; then
+    echo "Cleared Linux capture guard from a previous crash: $capture_guard"
+    rm -f "$capture_guard"
+  fi
+
   rm -f \
     "$profile_path/BepInEx/cache/chainloader_typeloader.dat" \
     "$profile_path/Renderer/BepInEx/cache/chainloader_typeloader.dat"

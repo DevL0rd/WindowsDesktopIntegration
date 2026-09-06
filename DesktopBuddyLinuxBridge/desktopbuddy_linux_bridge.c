@@ -114,6 +114,7 @@ enum {
   OP_START_NODE = 6,
   OP_COPY_FRAME = 7,
   OP_CLOSE_FRAME = 8,
+  OP_LOAD = 9,
 };
 
 typedef int32_t (*db_linux_capture_start_node_fn)(uint32_t node_id, uint64_t *capture_id);
@@ -177,6 +178,16 @@ int32_t DesktopBuddyLinuxBridgeCall(DbLinuxBridgeCall *call) {
   if (status != 0) {
     call->status = status;
     return status;
+  }
+
+  /* Loading the Rust library drags PipeWire and its dependencies into the Wine process, which
+     is as capable of faulting as the capture connect that follows it. Every op loads lazily,
+     so a crash on the first call could be either one. Exposing the load on its own lets the
+     caller record a survived dlopen before it attempts a connect, which narrows a dead
+     renderer down to a single stage. */
+  if (call->op == OP_LOAD) {
+    call->status = 0;
+    return 0;
   }
 
   if (call->op == OP_POLL) {

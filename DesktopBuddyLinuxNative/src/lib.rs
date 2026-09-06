@@ -58,6 +58,29 @@ impl Default for DbLinuxSelection {
     }
 }
 
+/// Returned when an FFI entry point panicked and [`guard_ffi`] caught it.
+pub const DB_LINUX_PANICKED: i32 = -50;
+
+/// Runs an FFI entry point so a panic becomes a status code instead of an abort.
+///
+/// A panic cannot cross an `extern "C"` boundary: Rust aborts the process instead. Here that
+/// process is the Wine renderer, so an abort kills it mid-frame with no managed exception, no
+/// status code, and nothing in the log past the call that went in. Catching keeps the renderer
+/// alive and lets the C# side report the failure through its normal channels.
+///
+/// The closure state is built fresh per call, and the one piece of shared state a panic could
+/// leave inconsistent is the `captures()` mutex — whose callers already treat a poisoned lock
+/// as a plain failure — so asserting unwind safety costs nothing real here.
+fn guard_ffi<F: FnOnce() -> i32>(what: &str, body: F) -> i32 {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(status) => status,
+        Err(_) => {
+            log::error!("{what} panicked; returning {DB_LINUX_PANICKED} instead of aborting");
+            DB_LINUX_PANICKED
+        }
+    }
+}
+
 struct CaptureRuntime {
     stop: Arc<AtomicBool>,
     latest: Arc<Mutex<Option<DbLinuxFrame>>>,
@@ -242,6 +265,12 @@ fn handle_frame(state: &CallbackState, frame: WlxFrame) -> Option<()> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn db_linux_capture_start_node(node_id: u32, out_capture_id: *mut u64) -> i32 {
+    guard_ffi("db_linux_capture_start_node", || {
+        start_capture_node(node_id, out_capture_id)
+    })
+}
+
+fn start_capture_node(node_id: u32, out_capture_id: *mut u64) -> i32 {
     if node_id == 0 {
         return -12;
     }
