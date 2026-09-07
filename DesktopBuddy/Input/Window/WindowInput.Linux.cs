@@ -7,6 +7,48 @@ public static partial class WindowInput
 
     internal static ulong LinuxInputSession;
 
+    /// <summary>
+    /// Captured region of the focused panel, in compositor coordinates, plus the workspace
+    /// size. Input is injected against the workspace stream of the shared RemoteDesktop
+    /// session, but panel coordinates are relative to the captured source, so they have to be
+    /// offset into workspace space. Zero workspace values mean "capture is the whole
+    /// workspace", where the mapping is the identity.
+    /// </summary>
+    internal static int LinuxCaptureX, LinuxCaptureY;
+    internal static int LinuxCaptureW, LinuxCaptureH;
+    internal static int LinuxWorkspaceW, LinuxWorkspaceH;
+
+    internal static void SetLinuxInputTarget(ulong sessionId, int captureX, int captureY,
+        int captureW, int captureH, int workspaceW, int workspaceH)
+    {
+        LinuxInputSession = sessionId;
+        LinuxCaptureX = captureX;
+        LinuxCaptureY = captureY;
+        LinuxCaptureW = captureW;
+        LinuxCaptureH = captureH;
+        LinuxWorkspaceW = workspaceW;
+        LinuxWorkspaceH = workspaceH;
+    }
+
+    /// <summary>Maps panel-local normalized coordinates onto workspace-normalized ones.</summary>
+    private static void MapToWorkspace(float u, float v, out double outU, out double outV)
+    {
+        int ws = LinuxWorkspaceW, hs = LinuxWorkspaceH;
+        int cw = LinuxCaptureW, ch = LinuxCaptureH;
+
+        if (ws <= 0 || hs <= 0 || cw <= 0 || ch <= 0)
+        {
+            outU = u;
+            outV = v;
+            return;
+        }
+
+        double globalX = LinuxCaptureX + (double)u * cw;
+        double globalY = LinuxCaptureY + (double)v * ch;
+        outU = globalX / ws;
+        outV = globalY / hs;
+    }
+
     private static LinuxNativeBridge _linuxInput;
     private static readonly object _linuxInputLock = new();
 
@@ -28,7 +70,9 @@ public static partial class WindowInput
     internal static void LinuxMove(float u, float v)
     {
         ulong s = LinuxInputSession;
-        if (s != 0) LinuxInput().InputMotion(s, u, v);
+        if (s == 0) return;
+        MapToWorkspace(u, v, out double mu, out double mv);
+        LinuxInput().InputMotion(s, mu, mv);
     }
 
     internal static void LinuxTouchDown(uint slot, float u, float v)
@@ -36,7 +80,16 @@ public static partial class WindowInput
         ulong s = LinuxInputSession;
         if (s == 0) return;
         var b = LinuxInput();
-        int rc = b.TouchDown(s, slot, u, v);
+        MapToWorkspace(u, v, out double mu, out double mv);
+
+        if (PointerMode)
+        {
+            b.InputMotion(s, mu, mv);
+            b.InputButton(s, BtnLeft, true);
+            return;
+        }
+
+        int rc = b.TouchDown(s, slot, mu, mv);
         if (rc != 0)
             Log.Msg($"[LinuxInput] touch down rc={rc} session={s} slot={slot} err={b.GetInputLastError() ?? "(none)"}");
     }
@@ -44,13 +97,50 @@ public static partial class WindowInput
     internal static void LinuxTouchMove(uint slot, float u, float v)
     {
         ulong s = LinuxInputSession;
-        if (s != 0) LinuxInput().TouchMotion(s, slot, u, v);
+        if (s == 0) return;
+        MapToWorkspace(u, v, out double mu, out double mv);
+        var b = LinuxInput();
+
+        // In pointer mode a drag is just motion with the button already held, which is what
+        // makes click-and-drag select text the way a real mouse does.
+        if (PointerMode) { b.InputMotion(s, mu, mv); return; }
+
+        b.TouchMotion(s, slot, mu, mv);
     }
 
     internal static void LinuxTouchUp(uint slot)
     {
         ulong s = LinuxInputSession;
-        if (s != 0) LinuxInput().TouchUp(s, slot);
+        if (s == 0) return;
+        var b = LinuxInput();
+        if (PointerMode) { b.InputButton(s, BtnLeft, false); return; }
+        b.TouchUp(s, slot);
+    }
+
+    private const int BtnLeft = 0x110;
+    private const int BtnRight = 0x111;
+
+    /// <summary>
+    /// True when interaction should be sent as mouse buttons rather than touch contacts.
+    ///
+    /// The portal offers both, and they are not interchangeable from the application's point
+    /// of view: a touch contact makes apps engage their touchscreen behaviour (drag pans
+    /// instead of selecting, press-and-hold opens a context menu), and some shell surfaces
+    /// such as the tray and task manager do not accept touch at all.
+    /// </summary>
+    private static bool PointerMode =>
+        DesktopBuddyMod.Config?.GetValue(DesktopBuddyMod.LinuxPointerInput) ?? true;
+
+    /// <summary>Moves the pointer to the panel point and issues a full right-click there.</summary>
+    internal static void LinuxRightClick(float u, float v)
+    {
+        ulong s = LinuxInputSession;
+        if (s == 0) return;
+        var b = LinuxInput();
+        MapToWorkspace(u, v, out double mu, out double mv);
+        b.InputMotion(s, mu, mv);
+        b.InputButton(s, BtnRight, true);
+        b.InputButton(s, BtnRight, false);
     }
 
     internal static void LinuxScroll(int wheelDelta)

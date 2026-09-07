@@ -22,16 +22,26 @@ public partial class DesktopBuddyMod
 
         if (session.LinuxInputSessionId != 0)
         {
-            try
-            {
-                using var inputBridge = new LinuxNativeBridge();
-                inputBridge.InputStop(session.LinuxInputSessionId);
-                Msg($"[Cleanup] Stopped Linux input session {session.LinuxInputSessionId}");
-            }
-            catch (Exception ex) { Msg($"[Cleanup] Linux input stop error: {ex.Message}"); }
+            // The input session is shared by every panel, so it must NOT be stopped here.
+            // Closing one panel would otherwise kill input for all the others. Releasing it
+            // is LinuxSessionLifetime's job, once no panels remain.
             if (WindowInput.LinuxInputSession == session.LinuxInputSessionId)
                 WindowInput.LinuxInputSession = 0;
             session.LinuxInputSessionId = 0;
+        }
+
+        if (session.LinuxCaptureSessionId != 0)
+        {
+            try
+            {
+                using var captureBridge = new LinuxNativeBridge();
+                int status = captureBridge.ScreencastStop(session.LinuxCaptureSessionId);
+                Msg(status == 0
+                    ? $"[Cleanup] Stopped Linux capture session {session.LinuxCaptureSessionId}"
+                    : $"[Cleanup] Linux capture session {session.LinuxCaptureSessionId} stop returned {status}: {captureBridge.GetInputLastError() ?? "(no error)"}");
+            }
+            catch (Exception ex) { Msg($"[Cleanup] Linux capture stop error: {ex.Message}"); }
+            session.LinuxCaptureSessionId = 0;
         }
 
         if (VMic != null && session.VMicListener != null)
@@ -259,6 +269,8 @@ public partial class DesktopBuddyMod
             CleanupSession(session);
 
         ActiveSessions.Remove(session);
+        LinuxCursorEffectSuspender.Sync(ActiveSessions.Count);
+        LinuxSessionLifetime.Sync(ActiveSessions.Count);
     }
 
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 configuration="Release"
-profile_path="${DESKTOPBUDDY_PROFILE_PATH:-/home/devl0rd/.local/share/com.kesomannen.gale/resonite/profiles/Default}"
+profile_path="${DESKTOPBUDDY_PROFILE_PATH:-$HOME/.local/share/com.kesomannen.gale/resonite/profiles/Default}"
 no_deploy=0
 restart=0
 resonite_appid="${RESONITE_APPID:-2519830}"
@@ -155,6 +155,15 @@ deploy_profile() {
   copy_file "$linux_bridge_dir/DesktopBuddyLinuxBridge.so" "$bridge_target/DesktopBuddyLinuxBridge.so"
   copy_file "$linux_bridge_dir/libdesktopbuddy_linux_native.so" "$bridge_target/libdesktopbuddy_linux_native.so"
   copy_file "$linux_bridge_dir/libdesktopbuddy_linux_stream.so" "$bridge_target/libdesktopbuddy_linux_stream.so"
+
+  # The guard's strike count describes the binaries that crashed, and the copies above just
+  # replaced them. Keeping it would have a fresh build — quite possibly the fix — refuse to
+  # attempt native capture at all, with only a startup log line to say why.
+  local capture_guard="$bridge_target/linux-capture.guard"
+  if [[ -f "$capture_guard" ]]; then
+    echo "Cleared Linux capture guard from a previous crash: $capture_guard"
+    rm -f "$capture_guard"
+  fi
 
   rm -f \
     "$profile_path/BepInEx/cache/chainloader_typeloader.dat" \

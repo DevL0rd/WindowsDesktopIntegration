@@ -23,6 +23,19 @@ public class DesktopSession
     public Component LastActiveSource;
     public HashSet<uint> ActiveTouchIds = new();
 
+    /// <summary>
+    /// Panel is pinned: its Grabbable is disabled so it cannot be moved, which frees the grab
+    /// action to act as right-click instead.
+    /// </summary>
+    public bool PanelLocked;
+    public double LastGrabTick;
+
+    /// <summary>
+    /// Fractional wheel notches banked from thumbstick deflection. Scrolling is accumulated
+    /// over time rather than emitted per frame, so the speed does not scale with framerate.
+    /// </summary>
+    public float StickScrollAccum;
+
     public int LastScrollSign;
     public double LastScrollTick;
 
@@ -69,6 +82,16 @@ public class DesktopSession
     public DesktopKeyboardSource KeyboardSource;
 
     public ulong LinuxInputSessionId;
+
+    /// <summary>ScreenCast session owning this panel's capture stream; closed on cleanup.</summary>
+    public ulong LinuxCaptureSessionId;
+
+    /// <summary>
+    /// Captured region in compositor coordinates plus the workspace size, used to translate
+    /// panel-local input into the workspace space the input session addresses.
+    /// </summary>
+    public int LinuxPositionX, LinuxPositionY;
+    public int LinuxWorkspaceWidth, LinuxWorkspaceHeight;
 
     public FfmpegEncoder Encoder;
     internal ILiveStreamSource StreamSource;

@@ -46,7 +46,11 @@ public partial class DesktopBuddyMod
             float userScale = GetUserSpawnScale(userRoot);
             root.LocalScale = float3.One * userScale;
             root.GlobalPosition = headPos + forward * (0.8f * userScale);
-            root.GlobalRotation = floatQ.LookRotation(forward, float3.Up);
+            // Face the user, then pitch about the panel's own right axis so the tilt is
+            // applied in panel space and stays correct whichever way the user is turned.
+            float spawnTilt = Config?.GetValue(SpawnTilt) ?? 0f;
+            spawnTilt = MathX.Clamp(spawnTilt, -85f, 85f);
+            root.GlobalRotation = floatQ.LookRotation(forward, float3.Up) * floatQ.Euler(spawnTilt, 0f, 0f);
             var destroyer = root.AttachComponent<DestroyOnUserLeave>();
 
             destroyer.TargetUser.Target = localUser;
@@ -251,6 +255,11 @@ public partial class DesktopBuddyMod
         {
             Streamer = streamer,
             LinuxInputSessionId = streamer.LinuxInputSessionId,
+            LinuxCaptureSessionId = streamer.LinuxCaptureSessionId,
+            LinuxPositionX = streamer.LinuxPositionX,
+            LinuxPositionY = streamer.LinuxPositionY,
+            LinuxWorkspaceWidth = streamer.LinuxWorkspaceWidth,
+            LinuxWorkspaceHeight = streamer.LinuxWorkspaceHeight,
             Texture = procTex,
             Canvas = ui.Canvas,
             Root = root,
@@ -270,6 +279,8 @@ public partial class DesktopBuddyMod
             SeenRelatedHwnds = seenRelatedHwnds,
         };
         ActiveSessions.Add(session);
+        LinuxCursorEffectSuspender.Sync(ActiveSessions.Count);
+        LinuxSessionLifetime.Sync(ActiveSessions.Count);
         root.Destroyed += _ => CleanupAndRemoveSession(session, "root destroyed");
         if (Config?.GetValue(DynamicLightsEnabled) ?? false)
             CreateAdaptiveScreenLight(root, session, hwnd, streamer.MonitorHandle);
@@ -589,6 +600,7 @@ public partial class DesktopBuddyMod
 
         var kbBtn = ep.Button("⌨️"); StyleButton(kbBtn);
         var anchorBtn = ep.Button("⚓");   StyleButton(anchorBtn);
+        var lockBtn = ep.Button("📌"); StyleButton(lockBtn);
         var privateBtn = ep.Button("🔒"); StyleButton(privateBtn);
 
         ep.Style.MinWidth = 1f;
@@ -894,6 +906,7 @@ public partial class DesktopBuddyMod
                    (previewBtn != null && !previewBtn.IsDestroyed && previewBtn.IsHovering.Value) ||
                    (kbBtn != null && !kbBtn.IsDestroyed && kbBtn.IsHovering.Value) ||
                    (anchorBtn != null && !anchorBtn.IsDestroyed && anchorBtn.IsHovering.Value) ||
+                   (lockBtn != null && !lockBtn.IsDestroyed && lockBtn.IsHovering.Value) ||
                    (privateBtn != null && !privateBtn.IsDestroyed && privateBtn.IsHovering.Value) ||
                    (resyncBtn != null && !resyncBtn.IsDestroyed && resyncBtn.IsHovering.Value) ||
                    (curveSlider != null && !curveSlider.IsDestroyed && curveSlider.IsHovering.Value) ||
@@ -968,6 +981,7 @@ public partial class DesktopBuddyMod
         TrackHover(previewBtn);
         TrackHover(kbBtn);
         TrackHover(anchorBtn);
+        TrackHover(lockBtn);
         TrackHover(privateBtn);
         TrackHover(resyncBtn);
         root.World.RunInUpdates(4, PollSharedBarHover);
@@ -1112,6 +1126,18 @@ public partial class DesktopBuddyMod
             }
             var img = anchorBtn.Slot.GetComponent<Image>();
             if (img != null) img.Tint.Value = isAnchored ? anchorActiveColor : colorX.Clear;
+        };
+
+        lockBtn.LocalPressed += (IButton b, ButtonEventData d) =>
+        {
+            if (session == null) return;
+            session.PanelLocked = !session.PanelLocked;
+            if (grabbable != null && !grabbable.IsDestroyed)
+                grabbable.Enabled = !session.PanelLocked;
+            session.LastGrabTick = 0;
+            Msg($"[Lock] Panel {(session.PanelLocked ? "pinned (grab acts as right-click)" : "unpinned")}");
+            var lockImg = lockBtn.Slot.GetComponent<Image>();
+            if (lockImg != null) lockImg.Tint.Value = session.PanelLocked ? anchorActiveColor : colorX.Clear;
         };
 
         deviceIndicatorsSlot = CreateVirtualDeviceControls(

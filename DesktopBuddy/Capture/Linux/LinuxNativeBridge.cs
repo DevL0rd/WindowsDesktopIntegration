@@ -11,6 +11,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
     private delegate* unmanaged[Cdecl]<ulong, DbLinuxFrame*, int> _pollFrame;
     private delegate* unmanaged[Cdecl]<ulong, void> _stopCapture;
     private delegate* unmanaged[Cdecl]<ulong, int> _captureAlive;
+    private delegate* unmanaged[Cdecl]<uint, int> _nodeExists;
     private delegate* unmanaged[Cdecl]<DbLinuxFrame*, byte*, UIntPtr, int> _copyAndCloseFrame;
     private delegate* unmanaged[Cdecl]<DbLinuxFrame*, void> _closeFrame;
     private delegate* unmanaged[Cdecl]<ulong*, int> _audioStart;
@@ -33,7 +34,15 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
     private delegate* unmanaged[Cdecl]<ulong, uint, void> _inputTouchUp;
     private delegate* unmanaged[Cdecl]<ulong, int, void> _inputScroll;
     private delegate* unmanaged[Cdecl]<ulong, int, int, void> _inputKey;
-    private delegate* unmanaged[Cdecl]<ulong, void> _inputStop;
+    private delegate* unmanaged[Cdecl]<ulong, int, int, void> _inputButton;
+    private delegate* unmanaged[Cdecl]<ulong, int> _inputStop;
+    private delegate* unmanaged[Cdecl]<byte*, nuint, int> _inputRevokeToken;
+    private delegate* unmanaged[Cdecl]<byte*, nuint, ulong*, DbLinuxSelection*, int> _screencastStart;
+    private delegate* unmanaged[Cdecl]<ulong, int> _screencastStop;
+    private delegate* unmanaged[Cdecl]<byte*, nuint, byte*, nuint, int> _portalRevokeToken;
+    private delegate* unmanaged[Cdecl]<int, int, int, int, byte*, nuint, int> _kwinOutputName;
+    private delegate* unmanaged[Cdecl]<byte*, nuint, int> _kwinEffectLoaded;
+    private delegate* unmanaged[Cdecl]<byte*, nuint, int, int> _kwinEffectSet;
     private delegate* unmanaged[Cdecl]<IntPtr> _inputLastError;
     private IntPtr _module;
     private IntPtr _streamModule;
@@ -59,6 +68,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
             _pollFrame = (delegate* unmanaged[Cdecl]<ulong, DbLinuxFrame*, int>)NativeLibrary.GetExport(_module, "db_linux_capture_poll");
             _stopCapture = (delegate* unmanaged[Cdecl]<ulong, void>)NativeLibrary.GetExport(_module, "db_linux_capture_stop");
             _captureAlive = (delegate* unmanaged[Cdecl]<ulong, int>)NativeLibrary.GetExport(_module, "db_linux_capture_alive");
+            _nodeExists = (delegate* unmanaged[Cdecl]<uint, int>)NativeLibrary.GetExport(_module, "db_linux_node_exists");
             _copyAndCloseFrame = (delegate* unmanaged[Cdecl]<DbLinuxFrame*, byte*, UIntPtr, int>)NativeLibrary.GetExport(_module, "db_linux_frame_copy_and_close");
             _closeFrame = (delegate* unmanaged[Cdecl]<DbLinuxFrame*, void>)NativeLibrary.GetExport(_module, "db_linux_frame_close");
             _audioStart = (delegate* unmanaged[Cdecl]<ulong*, int>)NativeLibrary.GetExport(_module, "db_linux_audio_start");
@@ -71,7 +81,15 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
             _inputTouchUp = (delegate* unmanaged[Cdecl]<ulong, uint, void>)NativeLibrary.GetExport(_module, "db_linux_input_touch_up");
             _inputScroll = (delegate* unmanaged[Cdecl]<ulong, int, void>)NativeLibrary.GetExport(_module, "db_linux_input_scroll");
             _inputKey = (delegate* unmanaged[Cdecl]<ulong, int, int, void>)NativeLibrary.GetExport(_module, "db_linux_input_key");
-            _inputStop = (delegate* unmanaged[Cdecl]<ulong, void>)NativeLibrary.GetExport(_module, "db_linux_input_stop");
+            _inputButton = (delegate* unmanaged[Cdecl]<ulong, int, int, void>)NativeLibrary.GetExport(_module, "db_linux_input_button");
+            _inputStop = (delegate* unmanaged[Cdecl]<ulong, int>)NativeLibrary.GetExport(_module, "db_linux_input_stop");
+            _inputRevokeToken = (delegate* unmanaged[Cdecl]<byte*, nuint, int>)NativeLibrary.GetExport(_module, "db_linux_input_revoke_token");
+            _screencastStart = (delegate* unmanaged[Cdecl]<byte*, nuint, ulong*, DbLinuxSelection*, int>)NativeLibrary.GetExport(_module, "db_linux_screencast_start");
+            _screencastStop = (delegate* unmanaged[Cdecl]<ulong, int>)NativeLibrary.GetExport(_module, "db_linux_screencast_stop");
+            _portalRevokeToken = (delegate* unmanaged[Cdecl]<byte*, nuint, byte*, nuint, int>)NativeLibrary.GetExport(_module, "db_linux_portal_revoke_token");
+            _kwinOutputName = (delegate* unmanaged[Cdecl]<int, int, int, int, byte*, nuint, int>)NativeLibrary.GetExport(_module, "db_linux_kwin_output_name");
+            _kwinEffectLoaded = (delegate* unmanaged[Cdecl]<byte*, nuint, int>)NativeLibrary.GetExport(_module, "db_linux_kwin_effect_loaded");
+            _kwinEffectSet = (delegate* unmanaged[Cdecl]<byte*, nuint, int, int>)NativeLibrary.GetExport(_module, "db_linux_kwin_effect_set");
             _inputLastError = (delegate* unmanaged[Cdecl]<IntPtr>)NativeLibrary.GetExport(_module, "db_linux_input_last_error");
             Log.Msg($"[LinuxNativeBridge] Loaded {nativePath}");
             return true;
@@ -88,6 +106,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
             _pollFrame = null;
             _stopCapture = null;
             _captureAlive = null;
+            _nodeExists = null;
             _copyAndCloseFrame = null;
             _closeFrame = null;
             _audioStart = null;
@@ -100,10 +119,153 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
             _inputTouchUp = null;
             _inputScroll = null;
             _inputKey = null;
+            _inputButton = null;
             _inputStop = null;
+            _inputRevokeToken = null;
+            _screencastStart = null;
+            _screencastStop = null;
+            _portalRevokeToken = null;
+            _kwinOutputName = null;
+            _kwinEffectLoaded = null;
+            _kwinEffectSet = null;
             _inputLastError = null;
             return false;
         }
+    }
+
+    /// <summary>
+    /// Opens the ScreenCast picker (or restores silently with a token) and keeps the session
+    /// alive until <see cref="ScreencastStop"/>. Unlike the combined RemoteDesktop session,
+    /// this offers each monitor separately. Returns the session id, or 0 on failure.
+    /// </summary>
+    internal ulong ScreencastStart(string restoreToken, out DbLinuxSelection selection,
+        out string newRestoreToken, out bool isMonitor)
+    {
+        selection = default;
+        newRestoreToken = null;
+        isMonitor = false;
+        if (!TryLoad() || _screencastStart == null) return 0;
+
+        byte[] tokenBytes = string.IsNullOrEmpty(restoreToken)
+            ? null
+            : Encoding.UTF8.GetBytes(restoreToken);
+
+        ulong id = 0;
+        int status;
+        fixed (DbLinuxSelection* selPtr = &selection)
+        fixed (byte* tok = tokenBytes)
+            status = _screencastStart(tok, (nuint)(tokenBytes?.Length ?? 0), &id, selPtr);
+
+        if (status != 0 || id == 0)
+        {
+            Log.Msg($"[LinuxNativeBridge] Screencast start failed status={status}: {GetInputLastError() ?? "(none)"}");
+            return 0;
+        }
+
+        if (selection.RestoreTokenLen > 0)
+        {
+            int len = (int)Math.Min(selection.RestoreTokenLen, 256u);
+            fixed (byte* p = selection.RestoreToken)
+                newRestoreToken = Encoding.UTF8.GetString(p, len);
+        }
+        isMonitor = selection.IsMonitor != 0;
+        return id;
+    }
+
+    /// <summary>Stops a capture session and closes its portal session.</summary>
+    internal int ScreencastStop(ulong sessionId)
+    {
+        if (sessionId == 0) return -10;
+        if (!TryLoad() || _screencastStop == null) return -10;
+        return _screencastStop(sessionId);
+    }
+
+    /// <summary>
+    /// Revokes a persisted grant from a specific permission-store table. RemoteDesktop grants
+    /// live in "remote-desktop" and ScreenCast grants in "screencast".
+    /// </summary>
+    internal bool PortalRevokeToken(string table, string restoreToken)
+    {
+        if (string.IsNullOrEmpty(table) || string.IsNullOrEmpty(restoreToken)) return false;
+        if (!TryLoad() || _portalRevokeToken == null) return false;
+
+        byte[] tableBytes = Encoding.UTF8.GetBytes(table);
+        byte[] tokenBytes = Encoding.UTF8.GetBytes(restoreToken);
+        int status;
+        fixed (byte* t = tableBytes)
+        fixed (byte* k = tokenBytes)
+            status = _portalRevokeToken(t, (nuint)tableBytes.Length, k, (nuint)tokenBytes.Length);
+
+        if (status != 0)
+            Log.Msg($"[LinuxNativeBridge] Revoke {table} token failed status={status}: {GetInputLastError() ?? "(none)"}");
+        return status == 0;
+    }
+
+    /// <summary>
+    /// Returns the compositor's connector name for the output at the given geometry
+    /// ("DP-5", "HDMI-A-1", ...), or null when nothing matches or KWin is unavailable.
+    /// The ScreenCast portal never reports an output name, so it is recovered by matching
+    /// the captured geometry against what the compositor reports.
+    /// </summary>
+    internal string KWinOutputName(int x, int y, int width, int height)
+    {
+        if (!TryLoad() || _kwinOutputName == null) return null;
+
+        byte[] buffer = new byte[64];
+        int len;
+        fixed (byte* p = buffer)
+            len = _kwinOutputName(x, y, width, height, p, (nuint)buffer.Length);
+
+        return len > 0 ? Encoding.UTF8.GetString(buffer, 0, len) : null;
+    }
+
+    /// <summary>
+    /// Returns 1 if the named KWin effect is loaded, 0 if not, negative if KWin is
+    /// unavailable (any non-KDE desktop, where this is simply not applicable).
+    /// </summary>
+    internal int KWinEffectLoaded(string effect)
+    {
+        if (string.IsNullOrEmpty(effect)) return -1;
+        if (!TryLoad() || _kwinEffectLoaded == null) return -1;
+
+        byte[] bytes = Encoding.UTF8.GetBytes(effect);
+        fixed (byte* p = bytes)
+            return _kwinEffectLoaded(p, (nuint)bytes.Length);
+    }
+
+    /// <summary>Loads or unloads a KWin effect at runtime. Returns true on success.</summary>
+    internal bool KWinEffectSet(string effect, bool load)
+    {
+        if (string.IsNullOrEmpty(effect)) return false;
+        if (!TryLoad() || _kwinEffectSet == null) return false;
+
+        byte[] bytes = Encoding.UTF8.GetBytes(effect);
+        int status;
+        fixed (byte* p = bytes)
+            status = _kwinEffectSet(p, (nuint)bytes.Length, load ? 1 : 0);
+
+        if (status != 0)
+            Log.Msg($"[LinuxNativeBridge] KWin effect {(load ? "load" : "unload")} '{effect}' failed status={status}: {GetInputLastError() ?? "(none)"}");
+        return status == 0;
+    }
+
+    /// <summary>
+    /// Revokes a persisted portal grant so it stops appearing in the desktop's remembered
+    /// screen-sharing permissions. Call whenever a restore token is superseded or discarded.
+    /// </summary>
+    internal bool InputRevokeToken(string restoreToken)
+    {
+        if (string.IsNullOrEmpty(restoreToken)) return false;
+        if (!TryLoad() || _inputRevokeToken == null) return false;
+
+        byte[] tokenBytes = System.Text.Encoding.UTF8.GetBytes(restoreToken);
+        int status;
+        fixed (byte* tok = tokenBytes)
+            status = _inputRevokeToken(tok, (nuint)tokenBytes.Length);
+
+        if (status != 0)
+            Log.Msg($"[LinuxNativeBridge] Revoke token failed status={status}: {GetInputLastError() ?? "(none)"}");
+        return status == 0;
     }
 
     internal ulong SessionStart(string restoreToken, out DbLinuxSelection selection, out string newRestoreToken,
@@ -184,10 +346,27 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
         _inputKey(sessionId, keysym, pressed ? 1 : 0);
     }
 
-    internal void InputStop(ulong sessionId)
+    /// <summary>
+    /// Stops a portal session. Returns the native status: 0 when the portal confirmed the
+    /// close, 1 if the worker ended without reaching it, -1 if the session was not
+    /// registered, -2 if the close failed, -3 on lock poisoning. Returns -10 when the native
+    /// library is unavailable, which is distinct from anything the native side reports.
+    /// </summary>
+    /// <summary>Presses or releases a pointer button (evdev code; BTN_RIGHT is 0x111).</summary>
+    internal void InputButton(ulong sessionId, int button, bool pressed)
     {
-        if (_inputStop == null || sessionId == 0) return;
-        _inputStop(sessionId);
+        if (_inputButton == null || sessionId == 0) return;
+        _inputButton(sessionId, button, pressed ? 1 : 0);
+    }
+
+    internal int InputStop(ulong sessionId)
+    {
+        if (sessionId == 0) return -10;
+        // Callers routinely build a bridge purely to stop a session (cleanup does), so the
+        // library has to be loaded here. Without this the delegate is still null and the
+        // session is silently never closed, leaking the portal grant.
+        if (!TryLoad() || _inputStop == null) return -10;
+        return _inputStop(sessionId);
     }
 
     internal int StartCapture(uint nodeId, out ulong captureId)
@@ -220,6 +399,18 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
     {
         if (!TryLoad() || _captureAlive == null || captureId == 0) return true;
         return _captureAlive(captureId) != 0;
+    }
+
+    /// <summary>
+    /// Asks PipeWire whether <paramref name="nodeId"/> is a live node right now. Returns false
+    /// only for a definite "no"; if the check itself cannot run or the server does not answer,
+    /// this returns true so callers behave as they did before rather than discarding a source
+    /// on the strength of a failed lookup.
+    /// </summary>
+    internal bool NodeExists(uint nodeId)
+    {
+        if (!TryLoad() || _nodeExists == null) return true;
+        return _nodeExists(nodeId) != 0;
     }
 
     internal int CopyAndCloseFrame(DbLinuxFrame frame, byte[] destination)
@@ -467,6 +658,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
         _pollFrame = null;
         _stopCapture = null;
         _captureAlive = null;
+        _nodeExists = null;
         _copyAndCloseFrame = null;
         _closeFrame = null;
         _audioStart = null;
@@ -513,6 +705,13 @@ internal unsafe struct DbLinuxSelection
     public uint IsMonitor;
     public uint RestoreTokenLen;
     public fixed byte RestoreToken[256];
+    /// <summary>
+    /// Offset of the captured source in compositor coordinates. Non-zero for a monitor that
+    /// is not the leftmost one, and needed to map panel input onto the workspace when capture
+    /// and input come from separate portal sessions.
+    /// </summary>
+    public int PositionX;
+    public int PositionY;
 }
 
 [StructLayout(LayoutKind.Sequential)]

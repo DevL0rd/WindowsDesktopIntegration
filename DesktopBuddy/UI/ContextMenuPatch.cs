@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using HarmonyLib;
 using FrooxEngine;
@@ -274,6 +275,13 @@ public static class ContextMenuPatch
         public string Label;
         public string RestoreToken;
         public bool IsMonitor;
+        /// <summary>
+        /// Position of the monitor in compositor coordinates. Two monitors of the same size
+        /// are indistinguishable by label alone, so this is what gives each saved screen its
+        /// own identity rather than collapsing them into one entry.
+        /// </summary>
+        public int PositionX;
+        public int PositionY;
     }
 
     private static readonly object _linuxSourcesLock = new();
@@ -296,6 +304,7 @@ public static class ContextMenuPatch
         {
             string serialized = DesktopBuddyMod.Config?.GetValue(DesktopBuddyMod.LinuxSharedSources);
             if (string.IsNullOrWhiteSpace(serialized)) return;
+            var legacyTokens = new List<string>();
             lock (_linuxSourcesLock)
             {
                 _linuxSources.Clear();
@@ -306,15 +315,47 @@ public static class ContextMenuPatch
                     if (parts.Length < 3) continue;
                     string token = UnB64(parts[2]);
                     if (string.IsNullOrEmpty(token)) continue;
+
+                    // Entries written before per-screen support hold a RemoteDesktop token,
+                    // which a ScreenCast session cannot restore: the portal ignores it and
+                    // shows the picker instead, so the dial entry silently stops meaning
+                    // anything. Drop those and revoke the grant they left behind. The extra
+                    // position fields are what distinguishes the new format.
+                    if (parts.Length < 5)
+                    {
+                        legacyTokens.Add(token);
+                        continue;
+                    }
+
+                    int px = int.TryParse(parts[3], out int parsedX) ? parsedX : 0;
+                    int py = int.TryParse(parts[4], out int parsedY) ? parsedY : 0;
                     _linuxSources.Add(new LinuxSharedSource
                     {
                         IsMonitor = parts[0] == "1",
                         Label = UnB64(parts[1]),
                         RestoreToken = token,
+                        PositionX = px,
+                        PositionY = py,
                     });
                 }
             }
             DesktopBuddyMod.Msg($"[ContextMenu] Loaded {_linuxSources.Count} saved Linux source(s)");
+
+            if (legacyTokens.Count > 0)
+            {
+                DesktopBuddyMod.Msg($"[ContextMenu] Dropped {legacyTokens.Count} saved source(s) from the pre-per-screen format");
+                SaveLinuxSources();
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        using var bridge = new LinuxNativeBridge();
+                        foreach (string legacy in legacyTokens)
+                            bridge.PortalRevokeToken("remote-desktop", legacy);
+                    }
+                    catch (Exception ex) { DesktopBuddyMod.Msg($"[ContextMenu] Legacy revoke error: {ex.Message}"); }
+                });
+            }
         }
         catch (Exception ex) { DesktopBuddyMod.Msg($"[ContextMenu] Load sources error: {ex.Message}"); }
     }
@@ -331,7 +372,9 @@ public static class ContextMenuPatch
                     if (sb.Length > 0) sb.Append('\n');
                     sb.Append(s.IsMonitor ? '1' : '0').Append('|')
                       .Append(B64(s.Label)).Append('|')
-                      .Append(B64(s.RestoreToken));
+                      .Append(B64(s.RestoreToken)).Append('|')
+                      .Append(s.PositionX).Append('|')
+                      .Append(s.PositionY);
                 }
             }
             DesktopBuddyMod.Config?.Set(DesktopBuddyMod.LinuxSharedSources, sb.ToString());
@@ -418,6 +461,53 @@ public static class ContextMenuPatch
                 OpenLinuxPortalPickerThenSpawn(menu.World, captured);
             };
         }
+
+        if (sources.Count == 0)
+            return;
+
+        LocaleString clearLabel = "Clear saved screens";
+        colorX? clearColor = new colorX(0.45f, 0.15f, 0.15f, 1f);
+        var clear = menu.AddItem(in clearLabel, (Uri)null!, in clearColor);
+        clear.Button.LocalPressed += (IButton b, ButtonEventData d) =>
+        {
+            ClearLinuxSources();
+            // Redraw in place rather than closing, so the list is visibly empty.
+            ShowLinuxPickerPage(menu);
+        };
+    }
+
+    /// <summary>
+    /// Forgets every saved source and revokes the portal grants behind them, so clearing the
+    /// list also stops those grants lingering in the desktop's remembered permissions.
+    /// </summary>
+    private static void ClearLinuxSources()
+    {
+        List<string> tokens;
+        lock (_linuxSourcesLock)
+        {
+            tokens = new List<string>();
+            foreach (var s in _linuxSources)
+                if (!string.IsNullOrEmpty(s.RestoreToken)) tokens.Add(s.RestoreToken);
+            _linuxSources.Clear();
+        }
+
+        SaveLinuxSources();
+        DesktopBuddyMod.Msg($"[ContextMenu] Cleared {tokens.Count} saved Linux source(s)");
+
+        if (tokens.Count == 0) return;
+
+        Task.Run(() =>
+        {
+            try
+            {
+                using var bridge = new LinuxNativeBridge();
+                int revoked = 0;
+                foreach (string token in tokens)
+                    if (bridge.PortalRevokeToken("screencast", token)) revoked++;
+                DesktopBuddyMod.Msg($"[ContextMenu] Revoked {revoked}/{tokens.Count} cleared portal grant(s)");
+            }
+            catch (Exception ex) { DesktopBuddyMod.Msg($"[ContextMenu] Clear revoke error: {ex.Message}"); }
+        });
     }
 
     private static void OpenLinuxPortalPickerThenSpawn(World world, LinuxSharedSource reshare)
@@ -431,22 +521,57 @@ public static class ContextMenuPatch
             try
             {
                 using var bridge = new LinuxNativeBridge();
-                ulong inputSession = bridge.SessionStart(tokenIn, out var selection, out var newToken, out var isMonitor);
-                if (inputSession == 0 || selection.NodeId == 0)
+
+                // Input first: one shared RemoteDesktop session serves every panel, and it is
+                // what makes absolute pointer injection possible at all.
+                ulong inputSession = LinuxInputSessionManager.Ensure(out int workspaceW, out int workspaceH);
+
+                // Capture is a separate ScreenCast session so the picker offers each monitor
+                // individually instead of one whole-workspace entry.
+                ulong captureSession = bridge.ScreencastStart(tokenIn, out var selection, out var newToken, out var isMonitor);
+
+                // A restore token that no longer resolves stays broken forever, so drop it and
+                // fall back to the picker instead of leaving a dead entry on the dial.
+                void DropStaleSourceAndReopenPicker()
+                {
+                    if (reshare == null) return;
+                    ForgetLinuxSource(reshare);
+                    DesktopBuddyMod.Msg("[ContextMenu] Dropped stale saved Linux source; reopening portal picker");
+                    OpenLinuxPortalPickerThenSpawn(world, null);
+                }
+
+                if (captureSession == 0 || selection.NodeId == 0)
                 {
                     string err = bridge.GetInputLastError();
-                    DesktopBuddyMod.Msg($"[ContextMenu] Linux portal session failed inputSession={inputSession} node={selection.NodeId} error={err ?? "(none)"}");
+                    DesktopBuddyMod.Msg($"[ContextMenu] Linux capture session failed captureSession={captureSession} node={selection.NodeId} error={err ?? "(none)"}");
+                    DropStaleSourceAndReopenPicker();
+                    return;
+                }
+
+                // A stale token can also resolve to a session and still hand back a node that is
+                // already gone. That case used to reach the renderer, which faults inside PipeWire
+                // with no managed exception to catch and takes the session down with it, so the
+                // node is confirmed here while falling back to the picker is still possible.
+                if (!WaitForNode(bridge, selection.NodeId))
+                {
+                    DesktopBuddyMod.Msg($"[ContextMenu] Linux capture node={selection.NodeId} never appeared in PipeWire; treating source as stale");
+                    bridge.ScreencastStop(captureSession);
+                    DropStaleSourceAndReopenPicker();
                     return;
                 }
 
                 int width = selection.Width > 0 ? checked((int)selection.Width) : 1280;
                 int height = selection.Height > 0 ? checked((int)selection.Height) : 720;
 
-                DesktopBuddyMod.Msg($"[ContextMenu] Linux combined session={inputSession} node={selection.NodeId} (capture + input share one portal session)");
+                DesktopBuddyMod.Msg($"[ContextMenu] Linux capture session={captureSession} input session={inputSession} node={selection.NodeId}");
 
-                string title = RememberLinuxSource(reshare, newToken, isMonitor, width, height);
-                LinuxPortalSelectionStore.Set(new LinuxPortalSelection(selection.NodeId, width, height, inputSession));
-                DesktopBuddyMod.Msg($"[ContextMenu] Linux portal selected node={selection.NodeId} size={width}x{height} monitor={isMonitor} token={(newToken != null ? "yes" : "no")}");
+                string title = RememberLinuxSource(reshare, newToken, isMonitor, width, height,
+                    selection.PositionX, selection.PositionY);
+                LinuxPortalSelectionStore.Set(new LinuxPortalSelection(
+                    selection.NodeId, width, height, inputSession, captureSession,
+                    selection.PositionX, selection.PositionY, workspaceW, workspaceH));
+                DesktopBuddyMod.Msg($"[ContextMenu] Linux portal selected node={selection.NodeId} size={width}x{height} " +
+                    $"pos=({selection.PositionX},{selection.PositionY}) workspace={workspaceW}x{workspaceH} monitor={isMonitor} token={(newToken != null ? "yes" : "no")}");
                 world.RunInUpdates(0, () => DesktopBuddyMod.SpawnStreaming(world, IntPtr.Zero, title, startPrivate: DesktopBuddyMod.Config?.GetValue(DesktopBuddyMod.NewWindowsStartPrivate) ?? false));
             }
             catch (Exception ex)
@@ -456,37 +581,134 @@ public static class ContextMenuPatch
         });
     }
 
-    private static string RememberLinuxSource(LinuxSharedSource existing, string token, bool isMonitor, int width, int height)
+    /// <summary>
+    /// Confirms a PipeWire node is live, tolerating the short gap between the portal handing back
+    /// a session and its stream node reaching the registry. A single miss is not evidence of a
+    /// dead source; only a node still absent at the end of the window is treated as one.
+    /// </summary>
+    private static bool WaitForNode(LinuxNativeBridge bridge, uint nodeId)
     {
-        string label = isMonitor ? $"Desktop ({width}×{height})" : $"Window ({width}×{height})";
+        const int Attempts = 10;
+        const int DelayMs = 50;
+
+        for (int attempt = 0; attempt < Attempts; attempt++)
+        {
+            if (bridge.NodeExists(nodeId)) return true;
+            Thread.Sleep(DelayMs);
+        }
+        return false;
+    }
+
+    private static void ForgetLinuxSource(LinuxSharedSource source)
+    {
+        if (source == null) return;
+        string token;
+        lock (_linuxSourcesLock)
+        {
+            token = source.RestoreToken;
+            _linuxSources.Remove(source);
+        }
+        SaveLinuxSources();
+        RevokeLinuxToken(token);
+    }
+
+    /// <summary>
+    /// Drops a portal grant we no longer reference. Without this the grant persists in the
+    /// desktop's remembered-permissions list indefinitely, one entry per share.
+    /// </summary>
+    private static void RevokeLinuxToken(string token)
+    {
+        if (string.IsNullOrEmpty(token)) return;
+        try
+        {
+            using var bridge = new LinuxNativeBridge();
+            // Saved sources are ScreenCast grants now that capture has its own session, so
+            // they live in the "screencast" table rather than "remote-desktop".
+            if (bridge.PortalRevokeToken("screencast", token))
+                DesktopBuddyMod.Msg("[ContextMenu] Revoked superseded Linux portal grant");
+        }
+        catch (Exception ex) { DesktopBuddyMod.Msg($"[ContextMenu] Revoke token error: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Builds the dial label for a captured source. Screens are commonly identical in size,
+    /// so dimensions alone cannot tell two of them apart; the compositor-space position is the
+    /// only stable discriminator the portal gives us, and it is appended once more than one
+    /// screen is in play.
+    /// </summary>
+    private static string BuildLinuxSourceLabel(bool isMonitor, int width, int height, int posX, int posY)
+    {
+        if (!isMonitor)
+            return $"Window ({width}×{height})";
+
+        // Prefer the compositor's connector name; fall back to position, which is the only
+        // other thing that tells two identically sized screens apart.
+        string name = null;
+        try
+        {
+            using var bridge = new LinuxNativeBridge();
+            name = bridge.KWinOutputName(posX, posY, width, height);
+        }
+        catch (Exception ex) { DesktopBuddyMod.Msg($"[ContextMenu] Output name lookup failed: {ex.Message}"); }
+
+        if (!string.IsNullOrEmpty(name))
+            return $"Screen ({name}; {width}×{height}) @ {posX},{posY}";
+
+        return $"Screen ({width}×{height}) @ {posX},{posY}";
+    }
+
+    private static string RememberLinuxSource(LinuxSharedSource existing, string token, bool isMonitor,
+        int width, int height, int posX = 0, int posY = 0)
+    {
+        string label = BuildLinuxSourceLabel(isMonitor, width, height, posX, posY);
 
         if (string.IsNullOrEmpty(token))
             return existing?.Label ?? label;
 
         LinuxSharedSource entry;
+        string supersededToken = null;
         lock (_linuxSourcesLock)
         {
             entry = (existing != null && _linuxSources.Contains(existing)) ? existing : null;
             if (entry == null)
             {
+                // Match on the source's actual identity, not its label. Two 1920x1200 screens
+                // share a label under the old scheme and would collapse into one entry,
+                // revoking each other's grant.
                 foreach (var s in _linuxSources)
-                    if (s.RestoreToken == token || (s.Label == label && s.IsMonitor == isMonitor)) { entry = s; break; }
+                    if (s.RestoreToken == token ||
+                        (s.IsMonitor == isMonitor && s.PositionX == posX && s.PositionY == posY && s.Label == label))
+                    { entry = s; break; }
             }
 
             if (entry != null)
             {
+                // The portal mints a fresh grant per start, so the token we are replacing is
+                // now unreferenced and has to be revoked rather than simply overwritten.
+                if (!string.IsNullOrEmpty(entry.RestoreToken) && entry.RestoreToken != token)
+                    supersededToken = entry.RestoreToken;
                 entry.RestoreToken = token;
                 entry.Label = label;
                 entry.IsMonitor = isMonitor;
+                entry.PositionX = posX;
+                entry.PositionY = posY;
             }
             else
             {
-                entry = new LinuxSharedSource { Label = label, RestoreToken = token, IsMonitor = isMonitor };
+                entry = new LinuxSharedSource
+                {
+                    Label = label,
+                    RestoreToken = token,
+                    IsMonitor = isMonitor,
+                    PositionX = posX,
+                    PositionY = posY,
+                };
                 _linuxSources.Add(entry);
             }
         }
 
         SaveLinuxSources();
+        RevokeLinuxToken(supersededToken);
 
         return label;
     }

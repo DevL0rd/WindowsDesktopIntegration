@@ -60,8 +60,14 @@ internal static class DesktopInputWiring
 
         void TargetLinuxInput()
         {
-            if (DesktopBuddyPlatform.IsLinux)
-                WindowInput.LinuxInputSession = session.LinuxInputSessionId;
+            if (!DesktopBuddyPlatform.IsLinux) return;
+            // Input goes to the shared workspace session, so the focused panel's captured
+            // region has to travel with it or clicks land on the wrong screen.
+            WindowInput.SetLinuxInputTarget(
+                session.LinuxInputSessionId,
+                session.LinuxPositionX, session.LinuxPositionY,
+                session.Streamer?.Width ?? 0, session.Streamer?.Height ?? 0,
+                session.LinuxWorkspaceWidth, session.LinuxWorkspaceHeight);
         }
 
         void SendDesktopPressed(Component source, float2 point)
@@ -72,6 +78,7 @@ internal static class DesktopInputWiring
             float u = point.x;
             float v = point.y;
             uint touchId = GetTouchId(source);
+
             session.ActiveTouchIds.Add(touchId);
             WindowInput.SendAtPointWhenTargetAcceptable(
                 hwnd,
@@ -89,6 +96,7 @@ internal static class DesktopInputWiring
             TargetLinuxInput();
             if (ShouldIgnoreDesktopInput()) return;
             uint touchId = GetTouchId(source);
+
             if (!session.ActiveTouchIds.Contains(touchId)) return;
             float u = point.x;
             float v = point.y;
@@ -110,6 +118,7 @@ internal static class DesktopInputWiring
             uint touchId = GetTouchId(source);
             float u = point.x;
             float v = point.y;
+
             if (!session.ActiveTouchIds.Remove(touchId)) return;
             WindowInput.SendAtPointWhenTargetAcceptable(
                 hwnd,
@@ -160,31 +169,71 @@ internal static class DesktopInputWiring
                     : null;
                 if (controller != null)
                 {
+                    // While the panel is pinned the grab action cannot move it, so it is free
+                    // to mean right-click instead. Digital.Pressed is already edge-triggered;
+                    // the tick guard only stops a second source firing within the same frame.
+                    if (session.PanelLocked && controller.ActionGrab.Pressed)
+                    {
+                        double grabTick = root.World.Time.WorldTime;
+                        if (grabTick != session.LastGrabTick)
+                        {
+                            session.LastGrabTick = grabTick;
+                            float ru = hu, rv = hv;
+                            ClaimSource(source);
+                            WindowInput.SendAtPointWhenTargetAcceptable(
+                                hwnd, ru, rv, streamer.Width, streamer.Height, streamer.MonitorHandle,
+                                () => WindowInput.SendRightClick(hwnd, ru, rv, streamer.Width, streamer.Height, streamer.MonitorHandle),
+                                "right click");
+                        }
+                    }
+
                     float axisY = controller.Axis.Value.y;
                     if (Math.Abs(axisY) > 0.15f)
                     {
                         double tick = root.World.Time.WorldTime;
-                        bool sameDir = session.LastScrollSign == 0 || Math.Sign(axisY) == session.LastScrollSign;
-                        if (tick != session.LastScrollTick && sameDir)
+                        if (tick != session.LastScrollTick)
                         {
                             session.LastScrollTick = tick;
-                            session.LastScrollSign = Math.Sign(axisY);
-                            ClaimSource(source);
-                            int wheelDelta = (int)(axisY * 120f);
-                            WindowInput.SendAtPointWhenTargetAcceptable(
-                                hwnd,
-                                hu,
-                                hv,
-                                streamer.Width,
-                                streamer.Height,
-                                streamer.MonitorHandle,
-                                () => WindowInput.SendScroll(hwnd, hu, hv, streamer.Width, streamer.Height, wheelDelta, streamer.MonitorHandle),
-                                "controller wheel");
+
+                            int sign = Math.Sign(axisY);
+                            if (sign != session.LastScrollSign)
+                            {
+                                // Reversing should respond at once rather than working off
+                                // whatever was banked in the old direction.
+                                session.LastScrollSign = sign;
+                                session.StickScrollAccum = 0f;
+                            }
+
+                            float speed = DesktopBuddyMod.Config?.GetValue(DesktopBuddyMod.StickScrollSpeed) ?? 8f;
+                            if (speed <= 0f) speed = 8f;
+
+                            // Bank notches against elapsed time, so the rate is in notches per
+                            // second rather than per frame. The old per-frame emit meant scroll
+                            // speed tracked framerate: ~90 notches a second at 90 FPS.
+                            session.StickScrollAccum += axisY * speed * (float)root.World.Time.Delta;
+
+                            while (Math.Abs(session.StickScrollAccum) >= 1f)
+                            {
+                                int step = Math.Sign(session.StickScrollAccum);
+                                session.StickScrollAccum -= step;
+                                int wheelDelta = step * 120;
+                                ClaimSource(source);
+                                WindowInput.SendAtPointWhenTargetAcceptable(
+                                    hwnd,
+                                    hu,
+                                    hv,
+                                    streamer.Width,
+                                    streamer.Height,
+                                    streamer.MonitorHandle,
+                                    () => WindowInput.SendScroll(hwnd, hu, hv, streamer.Width, streamer.Height, wheelDelta, streamer.MonitorHandle),
+                                    "controller wheel");
+                            }
                         }
                     }
                     else
                     {
                         session.LastScrollSign = 0;
+                        session.StickScrollAccum = 0f;
                     }
                 }
             }

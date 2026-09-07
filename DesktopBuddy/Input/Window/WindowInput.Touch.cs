@@ -118,6 +118,16 @@ public static partial class WindowInput
         }
     }
 
+    /// <summary>
+    /// Issues a right-click at the given panel point. Linux only for now: the Windows path is
+    /// entirely touch-based and has no secondary-button equivalent.
+    /// </summary>
+    public static void SendRightClick(IntPtr hWnd, float u, float v, int clientW, int clientH, IntPtr monitorHandle = default)
+    {
+        if (DesktopBuddyPlatform.IsLinux) { LinuxRightClick(u, v); return; }
+        Log.Msg("[Input] Right-click is not implemented on this platform");
+    }
+
     public static void SendScroll(IntPtr hWnd, float u, float v, int clientW, int clientH, int wheelDelta, IntPtr monitorHandle = default)
     {
         if (DesktopBuddyPlatform.IsLinux) { LinuxMove(u, v); LinuxScroll(wheelDelta); return; }

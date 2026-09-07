@@ -17,6 +17,8 @@ namespace DesktopBuddySharedTextureBridge
             Log = Logger;
             LogInfo("DesktopBuddySharedTextureBridge starting...");
 
+            LinuxCaptureGuard.Initialize(Log);
+
             try
             {
                 new Harmony("net.desktopbuddy.sharedtexturebridge").PatchAll();

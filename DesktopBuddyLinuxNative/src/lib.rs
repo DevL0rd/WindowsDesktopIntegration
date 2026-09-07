@@ -10,6 +10,7 @@ use pipewire as pw;
 use wlx_capture::WlxCapture;
 
 mod audio;
+mod portal_capture;
 mod portal_input;
 use wlx_capture::frame::{MemFdFrame, WlxFrame};
 use wlx_capture::pipewire::PipewireCapture;
@@ -35,6 +36,11 @@ pub struct DbLinuxSelection {
     pub is_monitor: u32,
     pub restore_token_len: u32,
     pub restore_token: [u8; 256],
+    /// Offset of the captured source within the compositor's coordinate space. Needed to map
+    /// panel-local input onto the workspace when capture and input come from separate
+    /// sessions. Appended after the existing fields so the older layout stays aligned.
+    pub position_x: i32,
+    pub position_y: i32,
 }
 
 impl Default for DbLinuxSelection {
@@ -46,6 +52,31 @@ impl Default for DbLinuxSelection {
             is_monitor: 0,
             restore_token_len: 0,
             restore_token: [0; 256],
+            position_x: 0,
+            position_y: 0,
+        }
+    }
+}
+
+/// Returned when an FFI entry point panicked and [`guard_ffi`] caught it.
+pub const DB_LINUX_PANICKED: i32 = -50;
+
+/// Runs an FFI entry point so a panic becomes a status code instead of an abort.
+///
+/// A panic cannot cross an `extern "C"` boundary: Rust aborts the process instead. Here that
+/// process is the Wine renderer, so an abort kills it mid-frame with no managed exception, no
+/// status code, and nothing in the log past the call that went in. Catching keeps the renderer
+/// alive and lets the C# side report the failure through its normal channels.
+///
+/// The closure state is built fresh per call, and the one piece of shared state a panic could
+/// leave inconsistent is the `captures()` mutex — whose callers already treat a poisoned lock
+/// as a plain failure — so asserting unwind safety costs nothing real here.
+fn guard_ffi<F: FnOnce() -> i32>(what: &str, body: F) -> i32 {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(status) => status,
+        Err(_) => {
+            log::error!("{what} panicked; returning {DB_LINUX_PANICKED} instead of aborting");
+            DB_LINUX_PANICKED
         }
     }
 }
@@ -104,6 +135,92 @@ fn run_node_monitor(
 
     mainloop.run();
     Ok(())
+}
+
+/// How long to wait for the server to answer the registry sync before giving up on the answer.
+const NODE_CHECK_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Asks PipeWire whether `node_id` is currently a live node.
+///
+/// `Ok(None)` means the server did not answer in time — "could not tell", which is not the same
+/// as "absent" and must not be reported as one.
+fn node_exists(node_id: u32) -> Result<Option<bool>, pw::Error> {
+    pw::init();
+
+    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
+    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    let core = context.connect_rc(None)?;
+    let registry = core.get_registry_rc()?;
+
+    let found = Arc::new(AtomicBool::new(false));
+    let global_found = found.clone();
+    let _reg_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            if global.id == node_id && global.type_ == pw::types::ObjectType::Node {
+                global_found.store(true, Ordering::Release);
+            }
+        })
+        .register();
+
+    // The server replays every existing global before it answers a sync, so once `done` comes
+    // back for this one, a node we have not been told about is a node that does not exist.
+    let synced = Arc::new(AtomicBool::new(false));
+    let pending = core.sync(0)?;
+    let sync_done = synced.clone();
+    let sync_quit = mainloop.clone();
+    let _core_listener = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == pw::core::PW_ID_CORE && seq == pending {
+                sync_done.store(true, Ordering::Release);
+                sync_quit.quit();
+            }
+        })
+        .register();
+
+    // A wedged server must not turn sharing into a hang, so the loop always has an exit.
+    let timeout_quit = mainloop.clone();
+    let timer = mainloop.loop_().add_timer(move |_| timeout_quit.quit());
+    if let Err(e) = timer.update_timer(Some(NODE_CHECK_TIMEOUT), None).into_result() {
+        log::warn!("node check timer not armed ({e:?}); relying on the server to answer");
+    }
+
+    mainloop.run();
+
+    Ok(if synced.load(Ordering::Acquire) {
+        Some(found.load(Ordering::Acquire))
+    } else {
+        None
+    })
+}
+
+/// Reports whether a PipeWire node id is currently present: 1 present, 0 absent, -1 unknown.
+///
+/// A ScreenCast restore token that has gone stale can still resolve to a session and hand back a
+/// node id that no longer exists. Starting a capture on that node dies inside PipeWire, in the
+/// renderer, where nothing can catch it — so callers check first and fall back to the picker.
+/// Only a definite 0 justifies discarding a saved source; -1 means the check itself failed and
+/// the caller should proceed as it did before rather than throw the entry away.
+#[unsafe(no_mangle)]
+pub extern "C" fn db_linux_node_exists(node_id: u32) -> i32 {
+    guard_ffi("db_linux_node_exists", || {
+        if node_id == 0 {
+            return 0;
+        }
+        match node_exists(node_id) {
+            Ok(Some(true)) => 1,
+            Ok(Some(false)) => 0,
+            Ok(None) => {
+                log::warn!("node existence check for {node_id} timed out");
+                -1
+            }
+            Err(e) => {
+                log::warn!("node existence check for {node_id} failed: {e}");
+                -1
+            }
+        }
+    })
 }
 
 impl Drop for CaptureRuntime {
@@ -234,6 +351,12 @@ fn handle_frame(state: &CallbackState, frame: WlxFrame) -> Option<()> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn db_linux_capture_start_node(node_id: u32, out_capture_id: *mut u64) -> i32 {
+    guard_ffi("db_linux_capture_start_node", || {
+        start_capture_node(node_id, out_capture_id)
+    })
+}
+
+fn start_capture_node(node_id: u32, out_capture_id: *mut u64) -> i32 {
     if node_id == 0 {
         return -12;
     }

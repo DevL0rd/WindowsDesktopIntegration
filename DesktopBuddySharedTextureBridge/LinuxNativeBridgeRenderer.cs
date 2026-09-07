@@ -11,6 +11,7 @@ namespace DesktopBuddySharedTextureBridge
         private const uint OpStartNode = 6;
         private const uint OpCopyFrame = 7;
         private const uint OpCloseFrame = 8;
+        private const uint OpLoad = 9;
 
         private static readonly object LoadLock = new object();
         private static IntPtr SharedModule;
@@ -50,6 +51,18 @@ namespace DesktopBuddySharedTextureBridge
                 _call = SharedCall;
             }
             return true;
+        }
+
+        /// <summary>
+        /// Performs the native library load that every other op would otherwise do lazily on
+        /// first use. Splitting it out means a renderer that dies on the first capture attempt
+        /// tells us whether it died pulling PipeWire into the Wine process or connecting to it.
+        /// </summary>
+        internal int LoadNative()
+        {
+            if (!TryLoad()) return -1;
+            var call = new DbLinuxBridgeCall { Op = OpLoad };
+            return _call(ref call);
         }
 
         internal int StartCapture(uint nodeId)

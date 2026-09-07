@@ -16,6 +16,9 @@ public sealed partial class WgcCapture
     internal static unsafe List<GpuAdapterInfo> EnumerateAdapters()
     {
         var adapters = new List<GpuAdapterInfo>();
+        if (DesktopBuddyPlatform.IsLinux)
+            return adapters;
+
         var factoryGuid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
         int hr = CreateDXGIFactory1(ref factoryGuid, out IntPtr factory);
         if (hr < 0 || factory == IntPtr.Zero)

@@ -24,6 +24,11 @@ public sealed class DesktopStreamer : IDisposable
     public bool IsResizeRecreatePending => _backend?.IsResizeRecreatePending ?? false;
     public uint LinuxPipeWireNodeId => _backend is ILinuxPipeWireSelection linux ? linux.PipeWireNodeId : 0;
     public ulong LinuxInputSessionId => _backend is ILinuxPipeWireSelection linux ? linux.InputSessionId : 0;
+    public ulong LinuxCaptureSessionId => _backend is ILinuxPipeWireSelection linux ? linux.CaptureSessionId : 0;
+    public int LinuxPositionX => _backend is ILinuxPipeWireSelection linux ? linux.PositionX : 0;
+    public int LinuxPositionY => _backend is ILinuxPipeWireSelection linux ? linux.PositionY : 0;
+    public int LinuxWorkspaceWidth => _backend is ILinuxPipeWireSelection linux ? linux.WorkspaceWidth : 0;
+    public int LinuxWorkspaceHeight => _backend is ILinuxPipeWireSelection linux ? linux.WorkspaceHeight : 0;
 
     public Action<IntPtr, IntPtr, int, int> OnGpuFrame
     {

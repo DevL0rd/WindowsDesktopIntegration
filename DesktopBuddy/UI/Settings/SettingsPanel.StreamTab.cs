@@ -64,6 +64,10 @@ public partial class DesktopBuddyMod
                 RequestStreamEncoderRestart(session, "encoder preference");
             });
 
+        // Preferred GPU is selected by DXGI adapter LUID, which only exists on Windows.
+        if (DesktopBuddyPlatform.IsLinux)
+            return;
+
         string currentLuid = Config?.GetValue(PreferredGpuLuid)?.Trim() ?? "";
         var gpus = WgcCapture.EnumerateAdapters()
             .Where(g => !g.IsBasicRenderDriver && !string.IsNullOrWhiteSpace(g.Name))
