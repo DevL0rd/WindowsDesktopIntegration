@@ -53,6 +53,7 @@ namespace DesktopBuddySharedTextureBridge
         internal void Update()
         {
             SharedTextureSlot.ProcessDeferredNativeReleases();
+            LinuxCaptureTextureSlot.ProcessDeferredTextureDestroys();
             TryEnsureMessenger();
             TryPublishRendererDevice();
 

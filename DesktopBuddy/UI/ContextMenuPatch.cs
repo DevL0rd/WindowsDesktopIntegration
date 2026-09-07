@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using HarmonyLib;
 using FrooxEngine;
@@ -528,19 +529,34 @@ public static class ContextMenuPatch
                 // Capture is a separate ScreenCast session so the picker offers each monitor
                 // individually instead of one whole-workspace entry.
                 ulong captureSession = bridge.ScreencastStart(tokenIn, out var selection, out var newToken, out var isMonitor);
+
+                // A restore token that no longer resolves stays broken forever, so drop it and
+                // fall back to the picker instead of leaving a dead entry on the dial.
+                void DropStaleSourceAndReopenPicker()
+                {
+                    if (reshare == null) return;
+                    ForgetLinuxSource(reshare);
+                    DesktopBuddyMod.Msg("[ContextMenu] Dropped stale saved Linux source; reopening portal picker");
+                    OpenLinuxPortalPickerThenSpawn(world, null);
+                }
+
                 if (captureSession == 0 || selection.NodeId == 0)
                 {
                     string err = bridge.GetInputLastError();
                     DesktopBuddyMod.Msg($"[ContextMenu] Linux capture session failed captureSession={captureSession} node={selection.NodeId} error={err ?? "(none)"}");
+                    DropStaleSourceAndReopenPicker();
+                    return;
+                }
 
-                    // A restore token that no longer resolves stays broken forever, so drop it
-                    // and fall back to the picker instead of leaving a dead entry on the dial.
-                    if (reshare != null)
-                    {
-                        ForgetLinuxSource(reshare);
-                        DesktopBuddyMod.Msg("[ContextMenu] Dropped stale saved Linux source; reopening portal picker");
-                        OpenLinuxPortalPickerThenSpawn(world, null);
-                    }
+                // A stale token can also resolve to a session and still hand back a node that is
+                // already gone. That case used to reach the renderer, which faults inside PipeWire
+                // with no managed exception to catch and takes the session down with it, so the
+                // node is confirmed here while falling back to the picker is still possible.
+                if (!WaitForNode(bridge, selection.NodeId))
+                {
+                    DesktopBuddyMod.Msg($"[ContextMenu] Linux capture node={selection.NodeId} never appeared in PipeWire; treating source as stale");
+                    bridge.ScreencastStop(captureSession);
+                    DropStaleSourceAndReopenPicker();
                     return;
                 }
 
@@ -563,6 +579,24 @@ public static class ContextMenuPatch
                 DesktopBuddyMod.Msg($"[ContextMenu] Linux portal picker error: {ex}");
             }
         });
+    }
+
+    /// <summary>
+    /// Confirms a PipeWire node is live, tolerating the short gap between the portal handing back
+    /// a session and its stream node reaching the registry. A single miss is not evidence of a
+    /// dead source; only a node still absent at the end of the window is treated as one.
+    /// </summary>
+    private static bool WaitForNode(LinuxNativeBridge bridge, uint nodeId)
+    {
+        const int Attempts = 10;
+        const int DelayMs = 50;
+
+        for (int attempt = 0; attempt < Attempts; attempt++)
+        {
+            if (bridge.NodeExists(nodeId)) return true;
+            Thread.Sleep(DelayMs);
+        }
+        return false;
     }
 
     private static void ForgetLinuxSource(LinuxSharedSource source)

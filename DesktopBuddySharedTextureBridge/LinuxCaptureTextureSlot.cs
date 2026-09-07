@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using BepInEx.Logging;
 using UnityEngine;
@@ -7,6 +8,12 @@ namespace DesktopBuddySharedTextureBridge
 {
     internal sealed class LinuxCaptureTextureSlot : IBridgeTextureSlot
     {
+        /// <summary>
+        /// Frames a texture retired on teardown is kept alive before it is destroyed. Matches the
+        /// deferral the shared-texture path uses for its native handles.
+        /// </summary>
+        private const int DeferredDestroyFrames = 3;
+
         private const uint DrmFormatArgb8888 = 0x34325241;
         private const uint DrmFormatXrgb8888 = 0x34325258;
         private const uint DrmFormatAbgr8888 = 0x34324241;
@@ -240,11 +247,42 @@ namespace DesktopBuddySharedTextureBridge
             if (_disposed) return;
             _disposed = true;
 
-            DestroyTexture();
+            RetireTexture();
             _bridge.Dispose();
             _requests.Clear();
         }
 
+        /// <summary>
+        /// Hands the texture to the deferred queue rather than destroying it here.
+        /// </summary>
+        /// <remarks>
+        /// Teardown is the one case where no replacement texture is published: the slot is being
+        /// unregistered, so a consumer that still holds this source for the rest of the frame has
+        /// nothing valid to re-read. Renderite's own <c>DuplicableDisplay.UnregisterRequest</c>
+        /// hit this and responded by never destroying the texture at all, commenting the call out
+        /// with "destroying and recreating it causes issues". It can afford that because it keeps
+        /// one texture per monitor; slots here come and go with every share, so holding them
+        /// forever would leak a full-resolution texture per share. Deferring instead keeps the
+        /// texture alive past any in-flight reference without growing without bound.
+        /// </remarks>
+        private void RetireTexture()
+        {
+            if (_texture == null)
+                return;
+
+            DeferredDestroys.Enqueue(new DeferredTextureDestroy
+            {
+                Texture = _texture,
+                FramesRemaining = DeferredDestroyFrames
+            });
+            _texture = null;
+        }
+
+        /// <summary>
+        /// Destroys the texture immediately. Only safe where a valid replacement is published in
+        /// the same call, which is what the resize path does — and what Renderite's own display
+        /// driver does for the same reason.
+        /// </summary>
         private void DestroyTexture()
         {
             if (_texture == null)
@@ -253,6 +291,36 @@ namespace DesktopBuddySharedTextureBridge
             try { UnityEngine.Object.Destroy(_texture); }
             catch (Exception ex) { SharedTextureBridgePlugin.LogWarning($"[LinuxCapture] Texture destroy failed: {ex.Message}"); }
             _texture = null;
+        }
+
+        private struct DeferredTextureDestroy
+        {
+            public Texture2D Texture;
+            public int FramesRemaining;
+        }
+
+        private static readonly ConcurrentQueue<DeferredTextureDestroy> DeferredDestroys =
+            new ConcurrentQueue<DeferredTextureDestroy>();
+
+        /// <summary>Destroys retired textures whose deferral has elapsed. Main thread only.</summary>
+        internal static void ProcessDeferredTextureDestroys()
+        {
+            int count = DeferredDestroys.Count;
+            for (int i = 0; i < count; i++)
+            {
+                if (!DeferredDestroys.TryDequeue(out var pending))
+                    return;
+
+                pending.FramesRemaining--;
+                if (pending.FramesRemaining > 0)
+                {
+                    DeferredDestroys.Enqueue(pending);
+                    continue;
+                }
+
+                try { UnityEngine.Object.Destroy(pending.Texture); }
+                catch (Exception ex) { SharedTextureBridgePlugin.LogWarning($"[LinuxCapture] Deferred texture destroy failed: {ex.Message}"); }
+            }
         }
 
         private void NotifyCallbacks()

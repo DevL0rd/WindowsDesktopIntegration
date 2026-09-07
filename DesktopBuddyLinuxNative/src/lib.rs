@@ -137,6 +137,92 @@ fn run_node_monitor(
     Ok(())
 }
 
+/// How long to wait for the server to answer the registry sync before giving up on the answer.
+const NODE_CHECK_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Asks PipeWire whether `node_id` is currently a live node.
+///
+/// `Ok(None)` means the server did not answer in time — "could not tell", which is not the same
+/// as "absent" and must not be reported as one.
+fn node_exists(node_id: u32) -> Result<Option<bool>, pw::Error> {
+    pw::init();
+
+    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
+    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    let core = context.connect_rc(None)?;
+    let registry = core.get_registry_rc()?;
+
+    let found = Arc::new(AtomicBool::new(false));
+    let global_found = found.clone();
+    let _reg_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            if global.id == node_id && global.type_ == pw::types::ObjectType::Node {
+                global_found.store(true, Ordering::Release);
+            }
+        })
+        .register();
+
+    // The server replays every existing global before it answers a sync, so once `done` comes
+    // back for this one, a node we have not been told about is a node that does not exist.
+    let synced = Arc::new(AtomicBool::new(false));
+    let pending = core.sync(0)?;
+    let sync_done = synced.clone();
+    let sync_quit = mainloop.clone();
+    let _core_listener = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == pw::core::PW_ID_CORE && seq == pending {
+                sync_done.store(true, Ordering::Release);
+                sync_quit.quit();
+            }
+        })
+        .register();
+
+    // A wedged server must not turn sharing into a hang, so the loop always has an exit.
+    let timeout_quit = mainloop.clone();
+    let timer = mainloop.loop_().add_timer(move |_| timeout_quit.quit());
+    if let Err(e) = timer.update_timer(Some(NODE_CHECK_TIMEOUT), None).into_result() {
+        log::warn!("node check timer not armed ({e:?}); relying on the server to answer");
+    }
+
+    mainloop.run();
+
+    Ok(if synced.load(Ordering::Acquire) {
+        Some(found.load(Ordering::Acquire))
+    } else {
+        None
+    })
+}
+
+/// Reports whether a PipeWire node id is currently present: 1 present, 0 absent, -1 unknown.
+///
+/// A ScreenCast restore token that has gone stale can still resolve to a session and hand back a
+/// node id that no longer exists. Starting a capture on that node dies inside PipeWire, in the
+/// renderer, where nothing can catch it — so callers check first and fall back to the picker.
+/// Only a definite 0 justifies discarding a saved source; -1 means the check itself failed and
+/// the caller should proceed as it did before rather than throw the entry away.
+#[unsafe(no_mangle)]
+pub extern "C" fn db_linux_node_exists(node_id: u32) -> i32 {
+    guard_ffi("db_linux_node_exists", || {
+        if node_id == 0 {
+            return 0;
+        }
+        match node_exists(node_id) {
+            Ok(Some(true)) => 1,
+            Ok(Some(false)) => 0,
+            Ok(None) => {
+                log::warn!("node existence check for {node_id} timed out");
+                -1
+            }
+            Err(e) => {
+                log::warn!("node existence check for {node_id} failed: {e}");
+                -1
+            }
+        }
+    })
+}
+
 impl Drop for CaptureRuntime {
     fn drop(&mut self) {
         self.stop();

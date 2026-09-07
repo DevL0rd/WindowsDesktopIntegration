@@ -11,6 +11,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
     private delegate* unmanaged[Cdecl]<ulong, DbLinuxFrame*, int> _pollFrame;
     private delegate* unmanaged[Cdecl]<ulong, void> _stopCapture;
     private delegate* unmanaged[Cdecl]<ulong, int> _captureAlive;
+    private delegate* unmanaged[Cdecl]<uint, int> _nodeExists;
     private delegate* unmanaged[Cdecl]<DbLinuxFrame*, byte*, UIntPtr, int> _copyAndCloseFrame;
     private delegate* unmanaged[Cdecl]<DbLinuxFrame*, void> _closeFrame;
     private delegate* unmanaged[Cdecl]<ulong*, int> _audioStart;
@@ -67,6 +68,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
             _pollFrame = (delegate* unmanaged[Cdecl]<ulong, DbLinuxFrame*, int>)NativeLibrary.GetExport(_module, "db_linux_capture_poll");
             _stopCapture = (delegate* unmanaged[Cdecl]<ulong, void>)NativeLibrary.GetExport(_module, "db_linux_capture_stop");
             _captureAlive = (delegate* unmanaged[Cdecl]<ulong, int>)NativeLibrary.GetExport(_module, "db_linux_capture_alive");
+            _nodeExists = (delegate* unmanaged[Cdecl]<uint, int>)NativeLibrary.GetExport(_module, "db_linux_node_exists");
             _copyAndCloseFrame = (delegate* unmanaged[Cdecl]<DbLinuxFrame*, byte*, UIntPtr, int>)NativeLibrary.GetExport(_module, "db_linux_frame_copy_and_close");
             _closeFrame = (delegate* unmanaged[Cdecl]<DbLinuxFrame*, void>)NativeLibrary.GetExport(_module, "db_linux_frame_close");
             _audioStart = (delegate* unmanaged[Cdecl]<ulong*, int>)NativeLibrary.GetExport(_module, "db_linux_audio_start");
@@ -104,6 +106,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
             _pollFrame = null;
             _stopCapture = null;
             _captureAlive = null;
+            _nodeExists = null;
             _copyAndCloseFrame = null;
             _closeFrame = null;
             _audioStart = null;
@@ -398,6 +401,18 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
         return _captureAlive(captureId) != 0;
     }
 
+    /// <summary>
+    /// Asks PipeWire whether <paramref name="nodeId"/> is a live node right now. Returns false
+    /// only for a definite "no"; if the check itself cannot run or the server does not answer,
+    /// this returns true so callers behave as they did before rather than discarding a source
+    /// on the strength of a failed lookup.
+    /// </summary>
+    internal bool NodeExists(uint nodeId)
+    {
+        if (!TryLoad() || _nodeExists == null) return true;
+        return _nodeExists(nodeId) != 0;
+    }
+
     internal int CopyAndCloseFrame(DbLinuxFrame frame, byte[] destination)
     {
         if (!TryLoad() || _copyAndCloseFrame == null || destination == null || destination.Length == 0)
@@ -643,6 +658,7 @@ internal sealed unsafe class LinuxNativeBridge : IDisposable
         _pollFrame = null;
         _stopCapture = null;
         _captureAlive = null;
+        _nodeExists = null;
         _copyAndCloseFrame = null;
         _closeFrame = null;
         _audioStart = null;
